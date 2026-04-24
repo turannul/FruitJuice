@@ -1,0 +1,13 @@
+[Unit]
+Description=FruitJuice: iDevice Battery Bridge Daemon
+After=netmuxd.service
+StartLimitBurst=5
+StartLimitIntervalSec=3600
+
+[Service]
+ExecStart=/usr/local/bin/fruitjuiced
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

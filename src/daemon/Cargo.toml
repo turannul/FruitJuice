@@ -1,0 +1,8 @@
+[package]
+name = "fruitjuiced"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "fruitjuiced"
+path = "main.rs"
