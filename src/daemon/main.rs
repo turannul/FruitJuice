@@ -106,7 +106,13 @@ fn convert_model_readable(code: &str) -> String {
         "J620" | "J621" | "J620AP" | "J621AP" => "iPad Pro 12.9-inch (6th Gen)".to_string(),
         "J517" | "J518" | "J517AP" | "J518AP" => "iPad Pro 11-inch (3rd Gen)".to_string(),
         "J522" | "J523" | "J522AP" | "J523AP" => "iPad Pro 12.9-inch (5th Gen)".to_string(),
-        _ => if code.is_empty() { "iPhone".to_string() } else { code.to_string() },
+        _ => {
+            if code.is_empty() {
+                "iPhone".to_string()
+            } else {
+                code.to_string()
+            }
+        }
     }
 }
 
@@ -125,18 +131,9 @@ pub fn get_device_info(debug: bool) -> Vec<BatteryInfo> {
 
     for line in ids.lines() {
         let udid = line.split_whitespace().next().unwrap_or("");
-        if udid.is_empty() { continue; }
-
-        let name_output = Command::new("idevice_id").arg(udid).output().ok();
-        let device_name = if let Some(out) = name_output {
-            if out.status.success() {
-                String::from_utf8_lossy(&out.stdout).trim().to_string()
-            } else {
-                "iPhone".to_string()
-            }
-        } else {
-            "iPhone".to_string()
-        };
+        if udid.is_empty() {
+            continue;
+        }
 
         let diag_output = Command::new("idevicediagnostics")
             .args(&["-u", udid, "ioregentry", "AppleSmartBattery", "--network"])
@@ -172,6 +169,17 @@ pub fn get_device_info(debug: bool) -> Vec<BatteryInfo> {
             continue;
         }
 
+        let name_output = Command::new("idevice_id").arg(udid).output().ok();
+        let device_name = if let Some(out) = name_output {
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            } else {
+                "iPhone".to_string()
+            }
+        } else {
+            "iPhone".to_string()
+        };
+
         let cap = extract_xml_int(&diag_xml, "StateOfCharge") as u8;
         let serial = extract_xml_string(&diag_xml, "Serial");
         let is_charging = extract_xml_bool(&diag_xml, "IsCharging");
@@ -196,9 +204,9 @@ pub fn get_device_info(debug: bool) -> Vec<BatteryInfo> {
 
         let readable_model = convert_model_readable(&internal_model);
         let class = if readable_model.contains("iPad") {
-            "Tablet".to_string()
+            "iPad".to_string()
         } else {
-            "Phone".to_string()
+            "iPhone".to_string()
         };
         let is_generic = device_name == "iPhone" || device_name == "iPad" || device_name.is_empty();
 
@@ -230,7 +238,7 @@ pub fn get_device_info(debug: bool) -> Vec<BatteryInfo> {
             },
             serial,
             udid: udid.to_string(),
-            class, // unused in name now, but kept for logic
+            class,
             voltage,
             cycles,
             charge_full_design,
@@ -275,12 +283,10 @@ fn main() {
     }
 
     let mut registered_devices: Vec<String> = Vec::new();
-    // Sync on start (match raw UDID naming)
     if let Ok(entries) = fs::read_dir("/sys/class/power_supply/") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                // Match anything that looks like a UDID (not BAT0 or ADP1)
-                if name != "BAT0" && name != "ADP1" && name.contains('-') {
+                if name.starts_with("network_") {
                     registered_devices.push(name.to_string());
                 }
             }
@@ -292,10 +298,11 @@ fn main() {
 
         let mut idx = 0;
         while idx < registered_devices.len() {
-            if !current_data
+            let still_alive = current_data
                 .iter()
-                .any(|d| d.udid == registered_devices[idx])
-            {
+                .any(|d| format!("network_{}_{}", d.class, d.udid) == registered_devices[idx]);
+
+            if !still_alive {
                 let dev_to_remove = registered_devices.remove(idx);
                 println!("Device lost or unresponsive, removing: {}", dev_to_remove);
                 let _ = fs::write(r_node, &dev_to_remove);
@@ -305,7 +312,7 @@ fn main() {
         }
 
         for info in current_data {
-            let dev_name = &info.udid; // Raw UDID as name
+            let dev_name = format!("network_{}_{}", info.class, info.udid);
             let base_path = format!("/sys/class/power_supply/{}", dev_name);
 
             if !Path::new(&base_path).exists() {
