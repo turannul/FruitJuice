@@ -16,6 +16,11 @@ struct idev_inst {
     int capacity;
     int status;
     int present;
+    int voltage_now;
+    int cycle_count;
+    int charge_full_design;
+    int charge_full;
+    int charge_now;
     struct device_attribute attr_model;
     struct device_attribute attr_serial;
 };
@@ -39,11 +44,33 @@ static int idev_get_property(struct power_supply *psy,
     case POWER_SUPPLY_PROP_PRESENT:
         val->intval = inst->present;
         break;
+    case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+        val->intval = inst->voltage_now;
+        break;
+    case POWER_SUPPLY_PROP_CYCLE_COUNT:
+        val->intval = inst->cycle_count;
+        break;
+    case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+        val->intval = inst->charge_full_design;
+        break;
+    case POWER_SUPPLY_PROP_CHARGE_FULL:
+        val->intval = inst->charge_full;
+        break;
+    case POWER_SUPPLY_PROP_CHARGE_NOW:
+        val->intval = inst->charge_now;
+        break;
+    case POWER_SUPPLY_PROP_CURRENT_NOW:
+    case POWER_SUPPLY_PROP_POWER_NOW:
+        val->intval = 0;
+        break;
     case POWER_SUPPLY_PROP_SCOPE:
         val->intval = POWER_SUPPLY_SCOPE_DEVICE;
         break;
     case POWER_SUPPLY_PROP_MANUFACTURER:
         val->strval = "Apple";
+        break;
+    case POWER_SUPPLY_PROP_TECHNOLOGY:
+        val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
         break;
     case POWER_SUPPLY_PROP_MODEL_NAME:
         val->strval = inst->model;
@@ -66,28 +93,51 @@ static int idev_set_property(struct power_supply *psy,
     switch (psp) {
     case POWER_SUPPLY_PROP_CAPACITY:
         inst->capacity = val->intval;
-        power_supply_changed(psy);
         break;
     case POWER_SUPPLY_PROP_STATUS:
         inst->status = val->intval;
-        power_supply_changed(psy);
         break;
     case POWER_SUPPLY_PROP_PRESENT:
         inst->present = val->intval;
-        power_supply_changed(psy);
+        break;
+    case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+        inst->voltage_now = val->intval;
+        break;
+    case POWER_SUPPLY_PROP_CYCLE_COUNT:
+        inst->cycle_count = val->intval;
+        break;
+    case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+        inst->charge_full_design = val->intval;
+        break;
+    case POWER_SUPPLY_PROP_CHARGE_FULL:
+        inst->charge_full = val->intval;
+        break;
+    case POWER_SUPPLY_PROP_CHARGE_NOW:
+        inst->charge_now = val->intval;
         break;
     default:
         return -EINVAL;
     }
+    power_supply_changed(psy);
     return 0;
 }
 
 static int idev_property_is_writeable(struct power_supply *psy,
                                         enum power_supply_property psp)
 {
-    return psp == POWER_SUPPLY_PROP_CAPACITY || 
-           psp == POWER_SUPPLY_PROP_STATUS ||
-           psp == POWER_SUPPLY_PROP_PRESENT;
+    switch (psp) {
+    case POWER_SUPPLY_PROP_CAPACITY:
+    case POWER_SUPPLY_PROP_STATUS:
+    case POWER_SUPPLY_PROP_PRESENT:
+    case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+    case POWER_SUPPLY_PROP_CYCLE_COUNT:
+    case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+    case POWER_SUPPLY_PROP_CHARGE_FULL:
+    case POWER_SUPPLY_PROP_CHARGE_NOW:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 static ssize_t show_model(struct device *dev, struct device_attribute *attr, char *buf)
@@ -138,9 +188,17 @@ static enum power_supply_property idev_props[] = {
     POWER_SUPPLY_PROP_STATUS,
     POWER_SUPPLY_PROP_CAPACITY,
     POWER_SUPPLY_PROP_PRESENT,
+    POWER_SUPPLY_PROP_VOLTAGE_NOW,
+    POWER_SUPPLY_PROP_CYCLE_COUNT,
+    POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+    POWER_SUPPLY_PROP_CHARGE_FULL,
+    POWER_SUPPLY_PROP_CHARGE_NOW,
+    POWER_SUPPLY_PROP_CURRENT_NOW,
+    POWER_SUPPLY_PROP_POWER_NOW,
     POWER_SUPPLY_PROP_SCOPE,
     POWER_SUPPLY_PROP_MODEL_NAME,
     POWER_SUPPLY_PROP_MANUFACTURER,
+    POWER_SUPPLY_PROP_TECHNOLOGY,
     POWER_SUPPLY_PROP_SERIAL_NUMBER,
 };
 
@@ -161,6 +219,7 @@ static ssize_t add_device_store(struct kobject *kobj, struct kobj_attribute *att
     }
 
     snprintf(inst->name, sizeof(inst->name), "network_%s_%s", class_name, udid);
+    
     inst->status = POWER_SUPPLY_STATUS_UNKNOWN;
     inst->present = 0;
     
@@ -215,16 +274,55 @@ err_psy:
     return ret;
 }
 
+static ssize_t remove_device_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+    char name[64];
+    struct idev_inst *inst, *tmp;
+    int found = 0;
+
+    if (sscanf(buf, "%63s", name) < 1) {
+        return -EINVAL;
+    }
+
+    mutex_lock(&idev_lock);
+    list_for_each_entry_safe(inst, tmp, &idev_devices, list) {
+        if (strcmp(inst->name, name) == 0) {
+            list_del(&inst->list);
+            found = 1;
+            break;
+        }
+    }
+    mutex_unlock(&idev_lock);
+
+    if (found) {
+        device_remove_file(&inst->psy->dev, &inst->attr_serial);
+        device_remove_file(&inst->psy->dev, &inst->attr_model);
+        power_supply_unregister(inst->psy);
+        kfree(inst);
+    }
+
+    return count;
+}
+
 static struct kobj_attribute add_device_attr = __ATTR(add_device, 0200, NULL, add_device_store);
+static struct kobj_attribute remove_device_attr = __ATTR(remove_device, 0200, NULL, remove_device_store);
 static struct kobject *idev_kobj;
 
 static int __init idev_factory_init(void)
 {
+    int ret;
     idev_kobj = kobject_create_and_add("fruitjuice", kernel_kobj);
     if (!idev_kobj) {
         return -ENOMEM;
     }
-    return sysfs_create_file(idev_kobj, &add_device_attr.attr);
+    ret = sysfs_create_file(idev_kobj, &add_device_attr.attr);
+    if (ret) goto err;
+    ret = sysfs_create_file(idev_kobj, &remove_device_attr.attr);
+    if (ret) goto err;
+    return 0;
+err:
+    kobject_put(idev_kobj);
+    return ret;
 }
 
 static void __exit idev_factory_exit(void)
