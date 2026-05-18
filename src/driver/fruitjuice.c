@@ -153,8 +153,7 @@ static ssize_t set_model(struct device *dev, struct device_attribute *attr, cons
     struct power_supply *psy = dev_get_drvdata(dev);
     struct idev_inst *inst = power_supply_get_drvdata(psy);
 
-    strncpy(inst->model, buf, sizeof(inst->model) - 1);
-    inst->model[sizeof(inst->model) - 1] = '\0';
+    strscpy(inst->model, buf, sizeof(inst->model));
     if (count > 0 && inst->model[strlen(inst->model) - 1] == '\n') {
         inst->model[strlen(inst->model) - 1] = '\0';
     }
@@ -175,8 +174,7 @@ static ssize_t set_serial(struct device *dev, struct device_attribute *attr, con
     struct power_supply *psy = dev_get_drvdata(dev);
     struct idev_inst *inst = power_supply_get_drvdata(psy);
 
-    strncpy(inst->serial, buf, sizeof(inst->serial) - 1);
-    inst->serial[sizeof(inst->serial) - 1] = '\0';
+    strscpy(inst->serial, buf, sizeof(inst->serial));
     if (count > 0 && inst->serial[strlen(inst->serial) - 1] == '\n') {
         inst->serial[strlen(inst->serial) - 1] = '\0';
     }
@@ -218,7 +216,20 @@ static ssize_t add_device_store(struct kobject *kobj, struct kobj_attribute *att
         return -ENOMEM;
     }
 
-    snprintf(inst->name, sizeof(inst->name), "network_%s_%s", class_name, udid);
+    snprintf(inst->name, sizeof(inst->name), "fj_%s_%s", class_name, udid);
+
+    mutex_lock(&idev_lock);
+    {
+        struct idev_inst *existing;
+        list_for_each_entry(existing, &idev_devices, list) {
+            if (strcmp(existing->name, inst->name) == 0) {
+                mutex_unlock(&idev_lock);
+                kfree(inst);
+                return count;
+            }
+        }
+    }
+    mutex_unlock(&idev_lock);
     
     inst->status = POWER_SUPPLY_STATUS_UNKNOWN;
     inst->present = 0;
@@ -292,7 +303,6 @@ static ssize_t remove_device_store(struct kobject *kobj, struct kobj_attribute *
             break;
         }
     }
-    mutex_unlock(&idev_lock);
 
     if (found) {
         device_remove_file(&inst->psy->dev, &inst->attr_serial);
@@ -300,6 +310,7 @@ static ssize_t remove_device_store(struct kobject *kobj, struct kobj_attribute *
         power_supply_unregister(inst->psy);
         kfree(inst);
     }
+    mutex_unlock(&idev_lock);
 
     return count;
 }
