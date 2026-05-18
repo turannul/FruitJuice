@@ -286,7 +286,7 @@ fn main() {
     if let Ok(entries) = fs::read_dir("/sys/class/power_supply/") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("network_") {
+                if name.starts_with("fj_") {
                     registered_devices.push(name.to_string());
                 }
             }
@@ -300,7 +300,7 @@ fn main() {
         while idx < registered_devices.len() {
             let still_alive = current_data
                 .iter()
-                .any(|d| format!("network_{}_{}", d.class, d.udid) == registered_devices[idx]);
+                .any(|d| format!("fj_{}_{}", d.class, d.udid) == registered_devices[idx]);
 
             if !still_alive {
                 let dev_to_remove = registered_devices.remove(idx);
@@ -312,7 +312,7 @@ fn main() {
         }
 
         for info in current_data {
-            let dev_name = format!("network_{}_{}", info.class, info.udid);
+            let dev_name = format!("fj_{}_{}", info.class, info.udid);
             let base_path = format!("/sys/class/power_supply/{}", dev_name);
 
             if !Path::new(&base_path).exists() {
