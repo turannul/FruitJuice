@@ -5,4 +5,4 @@ edition = "2024"
 
 [[bin]]
 name = "fruitjuiced"
-path = "main.rs"
+path = "fruitjuiced.rs"
