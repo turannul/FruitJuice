@@ -10,9 +10,7 @@ arch=('x86_64')
 url="https://github.com/turannul/fruitjuice"
 license=('GPL-2.0-only')
 depends=('dkms' 'glibc' 'netmuxd' 'libimobiledevice')
-optdepends=(
-    'linux-headers: building required module for kernel'
-)
+optdepends=('linux-headers')
 makedepends=('cargo' 'git')
 provides=("$pkgname-dkms" "$pkgname-git")
 conflicts=("$pkgname-git")
