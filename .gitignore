@@ -14,3 +14,5 @@ Cargo.lock
 .fruitjuice.*
 Module.symvers
 modules.order
+/pkg
+*.zst

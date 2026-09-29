@@ -5,6 +5,7 @@
 #include <linux/mutex.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/platform_device.h>
 
 struct idev_inst {
     struct list_head list;
@@ -27,6 +28,7 @@ struct idev_inst {
 
 static LIST_HEAD(idev_devices);
 static DEFINE_MUTEX(idev_lock);
+static struct platform_device *idev_pdev;
 
 static int idev_get_property(struct power_supply *psy,
                                enum power_supply_property psp,
@@ -243,7 +245,7 @@ static ssize_t add_device_store(struct kobject *kobj, struct kobj_attribute *att
     inst->desc.property_is_writeable = idev_property_is_writeable;
 
     psy_cfg.drv_data = inst;
-    inst->psy = power_supply_register(NULL, &inst->desc, &psy_cfg);
+    inst->psy = power_supply_register(&idev_pdev->dev, &inst->desc, &psy_cfg);
     if (IS_ERR(inst->psy)) {
         ret = PTR_ERR(inst->psy);
         kfree(inst);
@@ -315,24 +317,137 @@ static ssize_t remove_device_store(struct kobject *kobj, struct kobj_attribute *
     return count;
 }
 
+static ssize_t update_device_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+    char name[64] = {0};
+    char status_str[32] = {0};
+    char serial[128] = {0};
+    char model[128] = {0};
+    int cap = -1, present = 1, voltage = 0, cycles = 0;
+    int charge_full_design = 0, charge_full = 0, charge_now = 0;
+    struct idev_inst *inst, *target = NULL;
+    char *orig, *str, *token;
+
+    orig = kstrdup(buf, GFP_KERNEL);
+    if (!orig)
+        return -ENOMEM;
+
+    str = orig;
+    while ((token = strsep(&str, " \t\n")) != NULL) {
+        char *eq;
+        int i;
+        if (!*token)
+            continue;
+        eq = strchr(token, '=');
+        if (!eq)
+            continue;
+        *eq = '\0';
+        eq++;
+        if (strcmp(token, "name") == 0) {
+            strscpy(name, eq, sizeof(name));
+        } else if (strcmp(token, "cap") == 0) {
+            if (kstrtoint(eq, 10, &cap)) cap = -1;
+        } else if (strcmp(token, "status") == 0) {
+            strscpy(status_str, eq, sizeof(status_str));
+        } else if (strcmp(token, "present") == 0) {
+            if (kstrtoint(eq, 10, &present)) present = 1;
+        } else if (strcmp(token, "voltage") == 0) {
+            if (kstrtoint(eq, 10, &voltage)) voltage = 0;
+        } else if (strcmp(token, "cycles") == 0) {
+            if (kstrtoint(eq, 10, &cycles)) cycles = 0;
+        } else if (strcmp(token, "full_design") == 0) {
+            if (kstrtoint(eq, 10, &charge_full_design)) charge_full_design = 0;
+        } else if (strcmp(token, "full") == 0) {
+            if (kstrtoint(eq, 10, &charge_full)) charge_full = 0;
+        } else if (strcmp(token, "now") == 0) {
+            if (kstrtoint(eq, 10, &charge_now)) charge_now = 0;
+        } else if (strcmp(token, "serial") == 0) {
+            strscpy(serial, eq, sizeof(serial));
+        } else if (strcmp(token, "model") == 0) {
+            strscpy(model, eq, sizeof(model));
+            for (i = 0; model[i]; i++) {
+                if (model[i] == '_') model[i] = ' ';
+            }
+        }
+    }
+    kfree(orig);
+
+    if (!name[0])
+        return -EINVAL;
+
+    mutex_lock(&idev_lock);
+    list_for_each_entry(inst, &idev_devices, list) {
+        if (strcmp(inst->name, name) == 0) {
+            target = inst;
+            break;
+        }
+    }
+
+    if (target) {
+        if (cap >= 0) target->capacity = cap;
+        target->present = present;
+        if (voltage > 0) target->voltage_now = voltage;
+        if (cycles >= 0) target->cycle_count = cycles;
+        if (charge_full_design > 0) target->charge_full_design = charge_full_design;
+        if (charge_full > 0) target->charge_full = charge_full;
+        if (charge_now > 0) target->charge_now = charge_now;
+        if (serial[0]) strscpy(target->serial, serial, sizeof(target->serial));
+        if (model[0]) strscpy(target->model, model, sizeof(target->model));
+
+        if (strcmp(status_str, "Charging") == 0)
+            target->status = POWER_SUPPLY_STATUS_CHARGING;
+        else if (strcmp(status_str, "Discharging") == 0)
+            target->status = POWER_SUPPLY_STATUS_DISCHARGING;
+        else if (strcmp(status_str, "Not_charging") == 0 || strcmp(status_str, "Not charging") == 0)
+            target->status = POWER_SUPPLY_STATUS_NOT_CHARGING;
+        else if (strcmp(status_str, "Full") == 0)
+            target->status = POWER_SUPPLY_STATUS_FULL;
+        else if (status_str[0])
+            target->status = POWER_SUPPLY_STATUS_UNKNOWN;
+
+        power_supply_changed(target->psy);
+    }
+    mutex_unlock(&idev_lock);
+
+    return count;
+}
+
 static struct kobj_attribute add_device_attr = __ATTR(add_device, 0200, NULL, add_device_store);
 static struct kobj_attribute remove_device_attr = __ATTR(remove_device, 0200, NULL, remove_device_store);
+static struct kobj_attribute update_device_attr = __ATTR(update_device, 0200, NULL, update_device_store);
 static struct kobject *idev_kobj;
 
 static int __init idev_factory_init(void)
 {
     int ret;
+
+    idev_pdev = platform_device_register_simple("fruitjuice", -1, NULL, 0);
+    if (IS_ERR(idev_pdev)) {
+        return PTR_ERR(idev_pdev);
+    }
+
     idev_kobj = kobject_create_and_add("fruitjuice", kernel_kobj);
     if (!idev_kobj) {
-        return -ENOMEM;
+        ret = -ENOMEM;
+        goto err_pdev;
     }
+
+    add_device_attr.attr.mode = 0666;
+    remove_device_attr.attr.mode = 0666;
+    update_device_attr.attr.mode = 0666;
+
     ret = sysfs_create_file(idev_kobj, &add_device_attr.attr);
-    if (ret) goto err;
+    if (ret) goto err_kobj;
     ret = sysfs_create_file(idev_kobj, &remove_device_attr.attr);
-    if (ret) goto err;
+    if (ret) goto err_kobj;
+    ret = sysfs_create_file(idev_kobj, &update_device_attr.attr);
+    if (ret) goto err_kobj;
     return 0;
-err:
+
+err_kobj:
     kobject_put(idev_kobj);
+err_pdev:
+    platform_device_unregister(idev_pdev);
     return ret;
 }
 
@@ -350,6 +465,7 @@ static void __exit idev_factory_exit(void)
     }
     mutex_unlock(&idev_lock);
     kobject_put(idev_kobj);
+    platform_device_unregister(idev_pdev);
 }
 
 module_init(idev_factory_init);
@@ -358,4 +474,4 @@ module_exit(idev_factory_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("turannul");
 MODULE_DESCRIPTION("FruitJuice: iDevice Battery Bridge");
-MODULE_VERSION("1.0");
+MODULE_VERSION("1.2");

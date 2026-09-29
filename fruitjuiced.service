@@ -1,0 +1,11 @@
+[Unit]
+Description=FruitJuice: iDevice Battery Bridge Daemon
+Documentation=https://github.com/turannul/fruitjuice
+
+[Service]
+ExecStart=/usr/bin/fruitjuiced
+Restart=on-failure
+RestartSec=300
+
+[Install]
+WantedBy=default.target
