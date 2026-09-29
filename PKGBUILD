@@ -2,8 +2,7 @@
 # Packager: Turann_ <turanull000@gmail.com>
 
 pkgname=fruitjuice
-_pkgname=fruitjuice
-pkgver=1.0.r12.2b57e99
+pkgver=1
 pkgrel=1
 pkgdesc="FruitJuice: iDevice Battery Bridge (DKMS driver and daemon)"
 arch=('x86_64')
@@ -29,13 +28,13 @@ build() {
 
 package() {
     local src="$startdir/src/driver"
-    local dest="$pkgdir/usr/src/$_pkgname-$pkgver"
+    local dest="$pkgdir/usr/src/$pkgname-$pkgver"
 
     install -Dm755 "$startdir/src/daemon/target/release/fruitjuiced" "$pkgdir/usr/bin/fruitjuiced"
     install -Dm644 "$startdir/fruitjuiced.service" "$pkgdir/usr/lib/systemd/user/fruitjuiced.service"
 
     install -d -m0755 "$pkgdir/usr/lib/modules-load.d"
-    echo "$_pkgname" > "$pkgdir/usr/lib/modules-load.d/$_pkgname.conf"
+    echo "$pkgname" > "$pkgdir/usr/lib/modules-load.d/$pkgname.conf"
 
     install -d -m0755 "$dest"
     cp -a "$src/." "$dest/"
