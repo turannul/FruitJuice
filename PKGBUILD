@@ -2,7 +2,7 @@
 # Packager: Turann_ <turanull000@gmail.com>
 
 pkgname=fruitjuice
-pkgver=1
+pkgver=1.0.r17.6bfb12f
 pkgrel=1
 pkgdesc="FruitJuice: iDevice Battery Bridge (DKMS driver and daemon)"
 arch=('x86_64')
