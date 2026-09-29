@@ -8,7 +8,7 @@ pkgrel=1
 pkgdesc="FruitJuice: iDevice Battery Bridge (DKMS driver and daemon)"
 arch=('x86_64')
 url="https://github.com/turannul/fruitjuice"
-license=('GPL-3.0-or-later')
+license=('GPL-2.0-only')
 depends=('dkms' 'glibc' 'netmuxd' 'libimobiledevice')
 optdepends=(
     'linux-headers: building required module for kernel'
