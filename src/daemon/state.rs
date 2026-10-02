@@ -40,10 +40,10 @@ impl DeviceState {
     pub fn log_battery_changes(&mut self, stats: &BatteryStats) {
         let mut changes = Vec::new();
         if stats.cap != self.last_cap {
-            changes.push(format!("{}% >> {}%", self.last_cap, stats.cap));
+            changes.push(format!("Battery: {}% >> {}%", self.last_cap, stats.cap));
         }
         if stats.status != self.last_status {
-            changes.push(format!("{} >> {}", self.last_status, stats.status));
+            changes.push(format!("State: {} >> {}", self.last_status, stats.status));
         }
         if !changes.is_empty() {
             println!("[CHG] {} {}", self.display_name, changes.join(" "));
@@ -113,7 +113,7 @@ impl<'a> DeviceManager<'a> {
             state.log_battery_changes(&stats);
         } else {
             println!(
-                "[NEW] {} ({}) {}% [{}]",
+                "[NEW] {} ({}) Battery: {}% [{}]",
                 comp_data.device_name, readable_model, comp_data.battery_cap, status
             );
             update_sysfs_device(
@@ -205,7 +205,7 @@ impl<'a> DeviceManager<'a> {
                     0.0
                 };
                 println!(
-                    "[NEW] {} ({}) {}% [{}] (Health: {:.1}%, {} cycles)",
+                    "[NEW] {} ({}) Battery: {}% [{}] (Health: {:.1}%, {} cycles)",
                     display_name, readable_model, stats.cap, stats.status, health, stats.cycles
                 );
                 update_sysfs_device(
