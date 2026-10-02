@@ -16,3 +16,5 @@ Module.symvers
 modules.order
 /pkg
 *.zst
+/fruitjuice
+/src
