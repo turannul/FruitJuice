@@ -2,42 +2,40 @@
 # Packager: Turann_ <turanull000@gmail.com>
 
 pkgname=fruitjuice
-pkgver=1.0.r17.6bfb12f
+pkgver=2.0.0_1.0.r18.g92aac61
 pkgrel=1
 pkgdesc="FruitJuice: iDevice Battery Bridge (DKMS driver and daemon)"
-arch=('x86_64')
-url="https://github.com/turannul/fruitjuice"
+arch=('any')
+url="https://github.com/turannul/fruitjuice.git"
 license=('GPL-2.0-only')
 depends=('dkms' 'glibc' 'netmuxd' 'libimobiledevice')
 optdepends=('linux-headers')
 makedepends=('cargo' 'git')
 provides=("$pkgname-dkms" "$pkgname-git")
 conflicts=("$pkgname-git")
+replaces=("$pkgname-dkms")
+source=("git+https://github.com/turannul/fruitjuice.git")
+sha256sums=('SKIP')
 
 pkgver() {
-    local src="$startdir/src/driver"
-    local ver
-    ver=$(sed -n 's/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$src/dkms.conf")
-    printf "%s.r%s.%s" "${ver:-1.0}" "$(git -C "$startdir" rev-list --count HEAD -- .)" "$(git -C "$startdir" log -1 --format="%h" -- .)"
+  local _daemon_version _driver_version _revision _commit _driver_p="$srcdir/driver/" _daemon_p="$srcdir/daemon/"
+  _driver_version=$(sed -n 's/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$_driver_p/dkms.conf")
+  _daemon_version=$(awk -F'"' '/^\[package\]/{p=1} p && /^version *=/{print $2; exit}' "$_daemon_p/Cargo.toml")
+  _revision=$(git -C "$_driver_p" rev-list --count HEAD)
+  _commit=$(git -C "$_driver_p" rev-parse --short=7 HEAD)
+  printf '%s_%s.r%s.g%s' "${_daemon_version:?}" "${_driver_version:?}" "${_revision:?}" "${_commit:?}"
 }
 
 build() {
-    cd "$startdir/src/daemon"
-    cargo build --release --locked
+    cargo build --release --locked --manifest-path "$startdir/src/daemon/Cargo.toml"
 }
 
 package() {
-    local src="$startdir/src/driver"
-    local dest="$pkgdir/usr/src/$pkgname-$pkgver"
-
     install -Dm755 "$startdir/src/daemon/target/release/fruitjuiced" "$pkgdir/usr/bin/fruitjuiced"
     install -Dm644 "$startdir/fruitjuiced.service" "$pkgdir/usr/lib/systemd/user/fruitjuiced.service"
-
     install -d -m0755 "$pkgdir/usr/lib/modules-load.d"
     echo "$pkgname" > "$pkgdir/usr/lib/modules-load.d/$pkgname.conf"
-
-    install -d -m0755 "$dest"
-    cp -a "$src/." "$dest/"
-    find "$dest" -type f \( -name '*.o' -o -name '*.ko' -o -name '*.ko.zst' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.mod.o' -o -name '.*.cmd' -o -name 'Module.symvers' -o -name 'modules.order' \) -delete
-    sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"$pkgver\"/" "$dest/dkms.conf"
+    install -d -m0755 "$pkgdir/usr/src/$pkgname-$pkgver"
+    cp -a "$startdir/src/driver/." "$pkgdir/usr/src/$pkgname-$pkgver/"
+    sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"$pkgver\"/" "$pkgdir/usr/src/$pkgname-$pkgver/dkms.conf"
 }
