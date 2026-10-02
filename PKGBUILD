@@ -2,7 +2,7 @@
 # Packager: Turann_ (turannul) <turanull000@gmail.com>
 
 pkgname=fruitjuice
-pkgver=0.0-r0-g0
+pkgver=2.0.1_1.0.r22.g9556962
 pkgrel=1
 pkgdesc="iDevice battery bridge"
 arch=('x86_64')
