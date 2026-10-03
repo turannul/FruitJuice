@@ -26,9 +26,7 @@ fn print_help() {
     println!("Usage: fruitjuiced [OPTIONS]");
     println!();
     println!("Options:");
-    println!(
-        "  -r, --refresh <SECONDS>  Fallback battery poll interval in seconds (default: 300, 0 to disable)"
-    );
+    println!("  -r, --refresh <SECONDS>  Fallback battery poll interval in seconds (default: 300, 0 to disable)");
     println!("  -h, --help               Print help information");
 }
 
@@ -64,7 +62,7 @@ fn main() {
     };
 
     if !Path::new(a_node).exists() {
-        eprintln!("[ERR] Driver not found. Is fruitjuice module loaded?");
+        eprintln!("[ERR] module not found. Is fruitjuice module loaded?");
         exit(1);
     }
 
@@ -88,11 +86,8 @@ fn main() {
             let mut stream = match connect_and_listen() {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!(
-                        "[ERR] Failed to connect to netmuxd: {}. Retrying in 3s...",
-                        e
-                    );
-                    sleep(Duration::from_secs(3));
+                    eprintln!("[ERR] Failed to connect to netmuxd: {}. Retrying in 10s...", e);
+                    sleep(Duration::from_secs(10));
                     continue;
                 }
             };

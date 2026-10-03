@@ -27,11 +27,8 @@ pub fn query_battery(udid: &str, is_network: bool) -> Option<BatteryStats> {
     if !diag_output.status.success() {
         let err_msg = String::from_utf8_lossy(&diag_output.stderr);
         let detail = err_msg.trim();
-        if !detail.is_empty() {
-            eprintln!("[ERR] idevicediagnostics failed for {}: {}", udid, detail);
-        } else {
-            eprintln!("[ERR] idevicediagnostics failed for {}", udid);
-        }
+        let spr = if detail.is_empty() { "" } else { ": " };
+        eprintln!("[ERR] idevicediagnostics failed for {udid}{spr}{detail}");
         return None;
     }
     let diag_xml = String::from_utf8_lossy(&diag_output.stdout).to_string();
