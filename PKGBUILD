@@ -1,4 +1,4 @@
-# Maintainer: Turann_ <turanull000@gmail.com>
+# Maintainer: Turann_ (turannul) <turanull000@gmail.com>
 # Packager: Turann_ (turannul) <turanull000@gmail.com>
 
 pkgname=fruitjuice
