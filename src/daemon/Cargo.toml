@@ -1,8 +1,26 @@
 [package]
 name = "fruitjuiced"
-version = "2.0.1"
+version = "2.1.0"
 edition = "2024"
+
+[lib]
+name = "fruitjuice"
+path = "mod.rs"
 
 [[bin]]
 name = "fruitjuiced"
 path = "fruitjuiced.rs"
+
+[dependencies]
+idevice = { version = "0.1.68", features = ["usbmuxd", "diagnostics_relay", "notification_proxy", "companion_proxy"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }
+tokio-stream = "0.1"
+futures = "0.3"
+plist = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,248 +1,274 @@
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-use std::ptr;
+use idevice::IdeviceService;
+use idevice::provider::UsbmuxdProvider;
+use idevice::services::companion_proxy::CompanionProxy;
 
-use crate::xml::{extract_xml_bool, extract_xml_int, extract_xml_string};
-
-type IdeviceT = *mut std::ffi::c_void;
-type CompanionProxyClientT = *mut std::ffi::c_void;
-type PlistT = *mut std::ffi::c_void;
-
-const IDEVICE_LOOKUP_USBMUX: i32 = 1 << 1;
-const IDEVICE_LOOKUP_NETWORK: i32 = 1 << 2;
-
-#[link(name = "imobiledevice-1.0")]
-unsafe extern "C" {
-    fn idevice_new_with_options(device: *mut IdeviceT, udid: *const c_char, options: i32) -> i32;
-    fn idevice_free(device: IdeviceT) -> i32;
-    fn companion_proxy_client_start_service(
-        device: IdeviceT,
-        client: *mut CompanionProxyClientT,
-        label: *const c_char,
-    ) -> i32;
-    fn companion_proxy_client_free(client: CompanionProxyClientT) -> i32;
-    fn companion_proxy_get_device_registry(
-        client: CompanionProxyClientT,
-        paired_devices: *mut PlistT,
-    ) -> i32;
-    fn companion_proxy_get_value_from_registry(
-        client: CompanionProxyClientT,
-        companion_udid: *const c_char,
-        key: *const c_char,
-        value: *mut PlistT,
-    ) -> i32;
-}
-
-#[link(name = "plist-2.0")]
-unsafe extern "C" {
-    fn plist_to_xml(plist: PlistT, plist_xml: *mut *mut c_char, length: *mut u32);
-    fn plist_free(plist: PlistT);
-    fn plist_mem_free(ptr: *mut std::ffi::c_void);
-}
-
-unsafe fn plist_to_string(plist: PlistT) -> Option<String> {
-    if plist.is_null() {
-        return None;
-    }
-    let mut xml_ptr: *mut c_char = ptr::null_mut();
-    let mut len: u32 = 0;
-    unsafe {
-        plist_to_xml(plist, &mut xml_ptr, &mut len);
-        if xml_ptr.is_null() {
-            return None;
-        }
-        let c_str = CStr::from_ptr(xml_ptr);
-        let s = c_str.to_string_lossy().into_owned();
-        plist_mem_free(xml_ptr as *mut std::ffi::c_void);
-        Some(s)
+pub fn mask_udid(udid: &str) -> &str {
+    if udid.len() > 6 {
+        &udid[udid.len() - 4..]
+    } else {
+        udid
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct CompanionDeviceData {
     pub udid: String,
     pub device_name: String,
     pub model_code: String,
+    pub model_name: String,
+    pub model_detail: String,
+    pub hardware_model: String,
+    pub product_version: String,
     pub serial: String,
     pub battery_cap: u8,
     pub is_charging: bool,
 }
 
-pub fn query_companion_battery(parent_udid: &str, watch_udid: &str) -> Option<(u8, bool)> {
-    let c_parent = CString::new(parent_udid).ok()?;
-    let c_watch = CString::new(watch_udid).ok()?;
-    let c_label = CString::new("fruitjuiced").ok()?;
-    let c_cap_key = CString::new("BatteryCurrentCapacity").ok()?;
-    let c_chg_key = CString::new("BatteryIsCharging").ok()?;
+pub struct WatchModelInfo {
+    pub model_name: &'static str,
+    pub model_detail: &'static str,
+}
 
-    unsafe {
-        let mut dev: IdeviceT = ptr::null_mut();
-        if idevice_new_with_options(
-            &mut dev,
-            c_parent.as_ptr(),
-            IDEVICE_LOOKUP_USBMUX | IDEVICE_LOOKUP_NETWORK,
-        ) != 0
-            || dev.is_null()
-        {
-            return None;
-        }
+const fn watch(model_name: &'static str, model_detail: &'static str) -> Option<WatchModelInfo> {
+    Some(WatchModelInfo {
+        model_name,
+        model_detail,
+    })
+}
 
-        let mut client: CompanionProxyClientT = ptr::null_mut();
-        if companion_proxy_client_start_service(dev, &mut client, c_label.as_ptr()) != 0
-            || client.is_null()
-        {
-            idevice_free(dev);
-            return None;
-        }
-
-        let mut cap_plist: PlistT = ptr::null_mut();
-        let mut cap = 0u8;
-        if companion_proxy_get_value_from_registry(
-            client,
-            c_watch.as_ptr(),
-            c_cap_key.as_ptr(),
-            &mut cap_plist,
-        ) == 0
-            && !cap_plist.is_null()
-        {
-            if let Some(xml) = plist_to_string(cap_plist) {
-                cap = extract_xml_int(&xml, "BatteryCurrentCapacity") as u8;
-            }
-            plist_free(cap_plist);
-        }
-        companion_proxy_client_free(client);
-
-        let mut client2: CompanionProxyClientT = ptr::null_mut();
-        let mut is_charging = false;
-        if companion_proxy_client_start_service(dev, &mut client2, c_label.as_ptr()) == 0
-            && !client2.is_null()
-        {
-            let mut chg_plist: PlistT = ptr::null_mut();
-            if companion_proxy_get_value_from_registry(
-                client2,
-                c_watch.as_ptr(),
-                c_chg_key.as_ptr(),
-                &mut chg_plist,
-            ) == 0
-                && !chg_plist.is_null()
-            {
-                if let Some(xml) = plist_to_string(chg_plist) {
-                    is_charging = extract_xml_bool(&xml, "BatteryIsCharging");
-                }
-                plist_free(chg_plist);
-            }
-            companion_proxy_client_free(client2);
-        }
-
-        idevice_free(dev);
-        Some((cap, is_charging))
+pub fn get_watch_info(code: &str) -> Option<WatchModelInfo> {
+    match code.to_uppercase().as_str() {
+        "WATCH1,1" => watch("Apple Watch (1st generation)", "38mm Case"),
+        "WATCH1,2" => watch("Apple Watch (1st generation)", "42mm Case"),
+        "WATCH2,6" => watch("Apple Watch Series 1", "38mm Case - Aluminum"),
+        "WATCH2,7" => watch("Apple Watch Series 1", "42mm Case - Aluminum"),
+        "WATCH2,3" => watch("Apple Watch Series 2", "38mm Case"),
+        "WATCH2,4" => watch("Apple Watch Series 2", "42mm Case"),
+        "WATCH3,1" => watch("Apple Watch Series 3 (GPS + Cellular)", "38mm Case"),
+        "WATCH3,2" => watch("Apple Watch Series 3 (GPS + Cellular)", "42mm Case"),
+        "WATCH3,3" => watch("Apple Watch Series 3 (GPS)", "38mm Case - Aluminum"),
+        "WATCH3,4" => watch("Apple Watch Series 3 (GPS)", "42mm Case - Aluminum"),
+        "WATCH4,1" => watch("Apple Watch Series 4 (GPS)", "40mm Case - Aluminum"),
+        "WATCH4,2" => watch("Apple Watch Series 4 (GPS)", "44mm Case - Aluminum"),
+        "WATCH4,3" => watch("Apple Watch Series 4 (GPS + Cellular)", "40mm Case"),
+        "WATCH4,4" => watch("Apple Watch Series 4 (GPS + Cellular)", "44mm Case"),
+        "WATCH5,1" => watch("Apple Watch Series 5 (GPS)", "40mm Case - Aluminum"),
+        "WATCH5,2" => watch("Apple Watch Series 5 (GPS)", "44mm Case - Aluminum"),
+        "WATCH5,3" => watch("Apple Watch Series 5 (GPS + Cellular)", "40mm Case"),
+        "WATCH5,4" => watch("Apple Watch Series 5 (GPS + Cellular)", "44mm Case"),
+        "WATCH5,9" => watch("Apple Watch SE (GPS)", "40mm Case - Aluminum"),
+        "WATCH5,10" => watch("Apple Watch SE (GPS)", "44mm Case - Aluminum"),
+        "WATCH5,11" => watch("Apple Watch SE (GPS + Cellular)", "40mm Case - Aluminum"),
+        "WATCH5,12" => watch("Apple Watch SE (GPS + Cellular)", "44mm Case - Aluminum"),
+        "WATCH6,1" => watch("Apple Watch Series 6 (GPS)", "40mm Case - Aluminum"),
+        "WATCH6,2" => watch("Apple Watch Series 6 (GPS)", "44mm Case - Aluminum"),
+        "WATCH6,3" => watch("Apple Watch Series 6 (GPS + Cellular)", "40mm Case"),
+        "WATCH6,4" => watch("Apple Watch Series 6 (GPS + Cellular)", "44mm Case"),
+        "WATCH6,6" => watch("Apple Watch Series 7 (GPS)", "41mm Case - Aluminum"),
+        "WATCH6,7" => watch("Apple Watch Series 7 (GPS)", "45mm Case - Aluminum"),
+        "WATCH6,8" => watch("Apple Watch Series 7 (GPS + Cellular)", "41mm Case"),
+        "WATCH6,9" => watch("Apple Watch Series 7 (GPS + Cellular)", "45mm Case"),
+        "WATCH6,10" => watch(
+            "Apple Watch SE (2nd generation) (GPS)",
+            "40mm Case - Aluminum",
+        ),
+        "WATCH6,11" => watch(
+            "Apple Watch SE (2nd generation) (GPS)",
+            "44mm Case - Aluminum",
+        ),
+        "WATCH6,12" => watch(
+            "Apple Watch SE (2nd generation) (GPS + Cellular)",
+            "40mm Case - Aluminum",
+        ),
+        "WATCH6,13" => watch(
+            "Apple Watch SE (2nd generation) (GPS + Cellular)",
+            "44mm Case - Aluminum",
+        ),
+        "WATCH6,14" => watch("Apple Watch Series 8 (GPS)", "41mm Case - Aluminum"),
+        "WATCH6,15" => watch("Apple Watch Series 8 (GPS)", "45mm Case - Aluminum"),
+        "WATCH6,16" => watch("Apple Watch Series 8 (GPS + Cellular)", "41mm Case"),
+        "WATCH6,17" => watch("Apple Watch Series 8 (GPS + Cellular)", "45mm Case"),
+        "WATCH6,18" => watch("Apple Watch Ultra", "49mm Case - Titanium"),
+        "WATCH7,1" => watch("Apple Watch Series 9 (GPS)", "41mm Case - Aluminum"),
+        "WATCH7,2" => watch("Apple Watch Series 9 (GPS)", "45mm Case - Aluminum"),
+        "WATCH7,3" => watch("Apple Watch Series 9 (GPS + Cellular)", "41mm Case"),
+        "WATCH7,4" => watch("Apple Watch Series 9 (GPS + Cellular)", "45mm Case"),
+        "WATCH7,5" => watch("Apple Watch Ultra 2", "49mm Case - Titanium"),
+        "WATCH7,8" => watch("Apple Watch Series 10 (GPS)", "42mm Case - Aluminum"),
+        "WATCH7,9" => watch("Apple Watch Series 10 (GPS)", "46mm Case - Aluminum"),
+        "WATCH7,10" => watch("Apple Watch Series 10 (GPS + Cellular)", "42mm Case"),
+        "WATCH7,11" => watch("Apple Watch Series 10 (GPS + Cellular)", "46mm Case"),
+        "WATCH7,12" => watch("Apple Watch Ultra 3", "49mm Case - Titanium"),
+        "WATCH7,13" => watch(
+            "Apple Watch SE (3rd generation) (GPS)",
+            "40mm Case - Aluminum",
+        ),
+        "WATCH7,14" => watch(
+            "Apple Watch SE (3rd generation) (GPS)",
+            "44mm Case - Aluminum",
+        ),
+        "WATCH7,15" => watch(
+            "Apple Watch SE (3rd generation) (GPS + Cellular)",
+            "40mm Case - Aluminum",
+        ),
+        "WATCH7,16" => watch(
+            "Apple Watch SE (3rd generation) (GPS + Cellular)",
+            "44mm Case - Aluminum",
+        ),
+        "WATCH7,17" => watch("Apple Watch Series 11 (GPS)", "42mm Case - Aluminum"),
+        "WATCH7,18" => watch("Apple Watch Series 11 (GPS)", "46mm Case - Aluminum"),
+        "WATCH7,19" => watch("Apple Watch Series 11 (GPS + Cellular)", "42mm Case"),
+        "WATCH7,20" => watch("Apple Watch Series 11 (GPS + Cellular)", "46mm Case"),
+        _ => None,
     }
 }
 
-pub fn query_all_companions(parent_udid: &str) -> Vec<CompanionDeviceData> {
-    let mut result = Vec::new();
-    let c_parent = match CString::new(parent_udid) {
-        Ok(s) => s,
-        Err(_) => return result,
+pub fn format_watch_model(code: &str, hw_model: &str) -> String {
+    let clean_code = code.trim();
+    if !clean_code.is_empty() {
+        if let Some(info) = get_watch_info(clean_code) {
+            return info.model_name.to_string();
+        }
+        return clean_code.to_string();
+    }
+    let clean_hw = hw_model.trim();
+    if !clean_hw.is_empty() {
+        return clean_hw.to_string();
+    }
+    "Apple Watch".to_string()
+}
+
+pub fn format_watch_detail(code: &str) -> String {
+    get_watch_info(code)
+        .map(|info| info.model_detail.to_string())
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
+pub async fn query_companion_battery(
+    provider: &UsbmuxdProvider,
+    watch_udid: &str,
+) -> Option<(u8, bool)> {
+    let fetch = |key: &'static str| {
+        let prov = provider.clone();
+        let w_udid = watch_udid.to_string();
+        async move {
+            match CompanionProxy::connect(&prov).await {
+                Ok(mut c) => c.get_value(&w_udid, key).await.ok(),
+                Err(e) => {
+                    eprintln!(
+                        "[ERR] CompanionProxy connect failed for [...{}]: {}",
+                        mask_udid(&prov.udid),
+                        e
+                    );
+                    None
+                }
+            }
+        }
     };
-    let c_label = CString::new("fruitjuiced").unwrap();
 
-    unsafe {
-        let mut dev: IdeviceT = ptr::null_mut();
-        if idevice_new_with_options(
-            &mut dev,
-            c_parent.as_ptr(),
-            IDEVICE_LOOKUP_USBMUX | IDEVICE_LOOKUP_NETWORK,
-        ) != 0
-            || dev.is_null()
-        {
+    let (cap_raw, chg_raw) =
+        tokio::join!(fetch("BatteryCurrentCapacity"), fetch("BatteryIsCharging"));
+
+    let cap = cap_raw.and_then(|v| v.as_unsigned_integer()).unwrap_or(0) as u8;
+    let is_charging = chg_raw.and_then(|v| v.as_boolean()).unwrap_or(false);
+
+    Some((cap, is_charging))
+}
+
+pub async fn query_all_companions(provider: &UsbmuxdProvider) -> Vec<CompanionDeviceData> {
+    let mut result = Vec::new();
+
+    let mut comp = match CompanionProxy::connect(provider).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[ERR] Failed to connect CompanionProxy for [...{}]: {}",
+                mask_udid(&provider.udid),
+                e
+            );
             return result;
         }
+    };
 
-        let mut client: CompanionProxyClientT = ptr::null_mut();
-        if companion_proxy_client_start_service(dev, &mut client, c_label.as_ptr()) != 0
-            || client.is_null()
-        {
-            idevice_free(dev);
+    let registry = match comp.get_device_registry().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "[ERR] Failed to get companion device registry for [...{}]: {}",
+                mask_udid(&provider.udid),
+                e
+            );
             return result;
         }
+    };
 
-        let mut reg_plist: PlistT = ptr::null_mut();
-        let mut companion_udids = Vec::new();
-        if companion_proxy_get_device_registry(client, &mut reg_plist) == 0 && !reg_plist.is_null()
-        {
-            if let Some(xml) = plist_to_string(reg_plist) {
-                let mut cursor = &xml[..];
-                while let Some(start) = cursor.find("<string>") {
-                    let after_start = &cursor[start + 8..];
-                    if let Some(end) = after_start.find("</string>") {
-                        let udid = after_start[..end].trim().to_string();
-                        if !udid.is_empty() {
-                            companion_udids.push(udid);
-                        }
-                        cursor = &after_start[end + 9..];
-                    } else {
-                        break;
+    for watch_udid in registry {
+        let fetch_val = |key: &'static str| {
+            let prov = provider.clone();
+            let w_udid = watch_udid.clone();
+            async move {
+                match CompanionProxy::connect(&prov).await {
+                    Ok(mut c) => c.get_value(&w_udid, key).await.ok(),
+                    Err(e) => {
+                        eprintln!(
+                            "[ERR] CompanionProxy connect failed for [...{}]: {}",
+                            mask_udid(&prov.udid),
+                            e
+                        );
+                        None
                     }
                 }
             }
-            plist_free(reg_plist);
-        }
-        companion_proxy_client_free(client);
+        };
 
-        for c_udid in companion_udids {
-            let c_watch = CString::new(c_udid.as_str()).unwrap();
-            let fetch_key = |key_str: &str| -> Option<String> {
-                let mut cl: CompanionProxyClientT = ptr::null_mut();
-                if companion_proxy_client_start_service(dev, &mut cl, c_label.as_ptr()) != 0
-                    || cl.is_null()
-                {
-                    return None;
-                }
-                let c_k = CString::new(key_str).unwrap();
-                let mut v_plist: PlistT = ptr::null_mut();
-                let mut text = None;
-                if companion_proxy_get_value_from_registry(
-                    cl,
-                    c_watch.as_ptr(),
-                    c_k.as_ptr(),
-                    &mut v_plist,
-                ) == 0
-                    && !v_plist.is_null()
-                {
-                    text = plist_to_string(v_plist);
-                    plist_free(v_plist);
-                }
-                companion_proxy_client_free(cl);
-                text
-            };
+        let (name_raw, model_raw, hw_model_raw, ver_raw, serial_raw, cap_raw, chg_raw) = tokio::join!(
+            fetch_val("DeviceName"),
+            fetch_val("ProductType"),
+            fetch_val("HardwareModel"),
+            fetch_val("ProductVersion"),
+            fetch_val("SerialNumber"),
+            fetch_val("BatteryCurrentCapacity"),
+            fetch_val("BatteryIsCharging"),
+        );
 
-            let name = fetch_key("DeviceName")
-                .map(|x| extract_xml_string(&x, "DeviceName"))
-                .unwrap_or_else(|| "Apple Watch".to_string());
-            let model = fetch_key("ProductType")
-                .map(|x| extract_xml_string(&x, "ProductType"))
-                .unwrap_or_default();
-            let serial = fetch_key("SerialNumber")
-                .map(|x| extract_xml_string(&x, "SerialNumber"))
-                .unwrap_or_default();
-            let cap = fetch_key("BatteryCurrentCapacity")
-                .map(|x| extract_xml_int(&x, "BatteryCurrentCapacity") as u8)
-                .unwrap_or(0);
-            let charging = fetch_key("BatteryIsCharging")
-                .map(|x| extract_xml_bool(&x, "BatteryIsCharging"))
-                .unwrap_or(false);
+        let name = name_raw
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Apple Watch".to_string());
 
-            result.push(CompanionDeviceData {
-                udid: c_udid,
-                device_name: name,
-                model_code: model,
-                serial,
-                battery_cap: cap,
-                is_charging: charging,
-            });
-        }
+        let model = model_raw
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_default();
 
-        idevice_free(dev);
+        let hw_model = hw_model_raw
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let version = ver_raw
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let serial = serial_raw
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let cap = cap_raw.and_then(|v| v.as_unsigned_integer()).unwrap_or(0) as u8;
+        let charging = chg_raw.and_then(|v| v.as_boolean()).unwrap_or(false);
+
+        let model_name = format_watch_model(&model, &hw_model);
+        let model_detail = format_watch_detail(&model);
+
+        result.push(CompanionDeviceData {
+            udid: watch_udid,
+            device_name: name,
+            model_code: model,
+            model_name,
+            model_detail,
+            hardware_model: hw_model,
+            product_version: version,
+            serial,
+            battery_cap: cap,
+            is_charging: charging,
+        });
     }
 
     result

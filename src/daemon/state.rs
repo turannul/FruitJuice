@@ -1,12 +1,123 @@
+use idevice::provider::UsbmuxdProvider;
+use idevice::usbmuxd::UsbmuxdAddr;
 use std::collections::HashMap;
-use std::process::Child;
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use idevice::IdeviceService;
+use idevice::services::lockdown::LockdownClient;
 
 use crate::battery::{BatteryStats, query_battery, spawn_battery_observer};
-use crate::companion::{CompanionDeviceData, query_all_companions, query_companion_battery};
-use crate::models::{convert_model_readable, query_model_info};
-use crate::sysfs::{SysfsNodes, remove_sysfs_device, update_sysfs_device};
+use crate::companion::{
+    CompanionDeviceData, mask_udid, query_all_companions, query_companion_battery,
+};
+use crate::sysfs::{SysfsDeviceUpdate, SysfsNodes, remove_sysfs_device, update_sysfs_device};
+
+fn conn_mode(connections: &HashMap<u32, String>) -> &'static str {
+    match connections.values().any(|c| c == "USB") {
+        true => "Wired",
+        false => "Wireless",
+    }
+}
+
+pub struct DeviceInfo {
+    pub display_name: String,
+    pub model_name: String,
+    pub model_detail: String,
+    pub hardware_model: String,
+    pub class: String,
+    pub os_version: String,
+    pub product_type: String,
+}
+
+pub async fn query_device_info(
+    provider: &UsbmuxdProvider,
+    self_reported_model: Option<&str>,
+) -> DeviceInfo {
+    let mut dev_name = None;
+    let mut product_type = None;
+    let mut hardware_model = None;
+    let mut os_version = None;
+    let mut dev_class = None;
+
+    match LockdownClient::connect(provider).await {
+        Ok(mut lockdown) => {
+            if let Some(dict) = lockdown
+                .get_value(None, None)
+                .await
+                .ok()
+                .and_then(|v| v.into_dictionary())
+            {
+                let extract = |k: &str| dict.get(k).and_then(|v| v.as_string()).map(String::from);
+                dev_name = extract("DeviceName");
+                product_type = extract("ProductType");
+                hardware_model = extract("HardwareModel");
+                os_version = extract("ProductVersion");
+                dev_class = extract("DeviceClass");
+            } else {
+                for (key, target) in [
+                    ("DeviceName", &mut dev_name),
+                    ("ProductType", &mut product_type),
+                    ("HardwareModel", &mut hardware_model),
+                    ("ProductVersion", &mut os_version),
+                    ("DeviceClass", &mut dev_class),
+                ] {
+                    *target = lockdown
+                        .get_value(Some(key), None)
+                        .await
+                        .ok()
+                        .and_then(|v| v.as_string().map(String::from));
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[ERR] Failed to connect LockdownClient for [...{}]: {}",
+                mask_udid(&provider.udid),
+                e
+            );
+        }
+    }
+
+    let dev_name = dev_name.unwrap_or_else(|| "iPhone".to_string());
+    let product_type = product_type.unwrap_or_default();
+    let hardware_model = hardware_model.unwrap_or_default();
+    let os_version = os_version.unwrap_or_default();
+    let dev_class = dev_class.unwrap_or_else(|| "iPhone".to_string());
+
+    let model_name = self_reported_model
+        .map(String::from)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if !product_type.is_empty() {
+                product_type.clone()
+            } else {
+                dev_class.clone()
+            }
+        });
+
+    let class = match () {
+        _ if model_name.contains("iPad") || dev_class == "iPad" => "iPad",
+        _ if model_name.contains("Watch") || dev_class == "Watch" => "Watch",
+        _ => "iPhone",
+    }
+    .to_string();
+
+    let display_name = match dev_name.as_str() {
+        "iPhone" | "iPad" | "Apple Watch" => model_name.clone(),
+        _ => dev_name,
+    };
+
+    DeviceInfo {
+        display_name,
+        model_name,
+        model_detail: "N/A".to_string(),
+        hardware_model,
+        class,
+        os_version,
+        product_type,
+    }
+}
 
 pub enum DaemonEvent {
     Attached {
@@ -20,30 +131,53 @@ pub enum DaemonEvent {
     BatteryPush {
         udid: String,
     },
+    MuxDisconnected,
 }
 
 pub struct DeviceState {
     pub dev_name: String,
     pub display_name: String,
     pub model_readable: String,
+    pub model_detail: String,
+    pub hardware_model: String,
     pub class: String,
+    pub os_version: String,
+    pub product_type: String,
+    pub provider: UsbmuxdProvider,
     pub connections: HashMap<u32, String>,
-    pub last_poll: Instant,
     pub last_cap: u8,
     pub last_status: String,
-    pub observer: Option<Child>,
-    pub parent_udid: Option<String>,
+    pub observer: Option<JoinHandle<()>>,
     pub companions: Vec<String>,
 }
 
 impl DeviceState {
+    pub fn to_sysfs_update<'a>(
+        &'a self,
+        udid: &'a str,
+        stats: &'a BatteryStats,
+    ) -> SysfsDeviceUpdate<'a> {
+        SysfsDeviceUpdate {
+            dev_name: &self.dev_name,
+            class: &self.class,
+            udid,
+            device_name: &self.display_name,
+            device_model: &self.model_readable,
+            model_detail: &self.model_detail,
+            hardware_model: &self.hardware_model,
+            os_version: &self.os_version,
+            product_type: &self.product_type,
+            stats,
+        }
+    }
+
     pub fn log_battery_changes(&mut self, stats: &BatteryStats) {
         let mut changes = Vec::new();
         if stats.cap != self.last_cap {
             changes.push(format!("{}% >> {}%", self.last_cap, stats.cap));
         }
         if stats.status != self.last_status {
-            changes.push(format!("State: {} >> {}", self.last_status, stats.status));
+            changes.push(format!("{} >> {}", self.last_status, stats.status));
         }
         if !changes.is_empty() {
             println!("[CHG] {} {}", self.display_name, changes.join(" "));
@@ -76,358 +210,300 @@ impl<'a> DeviceManager<'a> {
         }
     }
 
-    fn register_or_update_companion(&mut self, parent_udid: &str, comp_data: &CompanionDeviceData) {
+    fn register_or_update_companion(
+        &mut self,
+        comp_data: &CompanionDeviceData,
+        parent_provider: &UsbmuxdProvider,
+    ) {
         let watch_udid = comp_data.udid.clone();
-        let readable_model = convert_model_readable(&comp_data.model_code);
+        let model_name = comp_data.model_name.clone();
+        let model_detail = comp_data.model_detail.clone();
+        let hw_model = comp_data.hardware_model.clone();
         let class = "Watch".to_string();
         let dev_name = format!("fj_{}_{}", class, watch_udid);
-        let status = if comp_data.is_charging {
-            "Charging".to_string()
-        } else if comp_data.battery_cap == 100 {
-            "Full".to_string()
-        } else {
-            "Discharging".to_string()
+
+        let cap = match comp_data.battery_cap {
+            0 => self
+                .devices
+                .get(&watch_udid)
+                .map(|d| d.last_cap)
+                .unwrap_or(0),
+            c => c,
         };
 
-        let stats = BatteryStats {
-            cap: comp_data.battery_cap,
-            status: status.clone(),
-            voltage: 4000,
-            cycles: 0,
-            charge_full_design: 1000,
-            charge_full: 1000,
-            charge_now: (comp_data.battery_cap as i32) * 10,
-            serial: comp_data.serial.clone(),
-        };
+        let stats = BatteryStats::companion_synthetic(
+            cap,
+            comp_data.is_charging,
+            comp_data.serial.clone(),
+            Some(model_name.clone()),
+        );
 
         if let Some(state) = self.devices.get_mut(&watch_udid) {
-            update_sysfs_device(
-                &state.dev_name,
-                &state.class,
-                &watch_udid,
-                &state.display_name,
-                &stats,
-                &self.sysfs_nodes,
-                &mut self.registered_devices,
-            );
+            let update = state.to_sysfs_update(&watch_udid, &stats);
+            update_sysfs_device(&update, &self.sysfs_nodes, &mut self.registered_devices);
             state.log_battery_changes(&stats);
-        } else {
-            println!(
-                "[NEW] {} ({}) {}% [{}]",
-                comp_data.device_name, readable_model, comp_data.battery_cap, status
-            );
-            update_sysfs_device(
-                &dev_name,
-                &class,
-                &watch_udid,
-                &comp_data.device_name,
-                &stats,
-                &self.sysfs_nodes,
-                &mut self.registered_devices,
-            );
-            self.devices.insert(
-                watch_udid,
-                DeviceState {
-                    dev_name,
-                    display_name: comp_data.device_name.clone(),
-                    model_readable: readable_model,
-                    class,
-                    connections: HashMap::new(),
-                    last_poll: Instant::now(),
-                    last_cap: comp_data.battery_cap,
-                    last_status: status,
-                    observer: None,
-                    parent_udid: Some(parent_udid.to_string()),
-                    companions: Vec::new(),
-                },
-            );
+            return;
         }
+
+        println!(
+            "[NEW] {} ({}) {}% [{}]",
+            comp_data.device_name, model_name, cap, stats.status
+        );
+        let update = SysfsDeviceUpdate {
+            dev_name: &dev_name,
+            class: &class,
+            udid: &watch_udid,
+            device_name: &comp_data.device_name,
+            device_model: &model_name,
+            model_detail: &model_detail,
+            hardware_model: &hw_model,
+            os_version: &comp_data.product_version,
+            product_type: &comp_data.model_code,
+            stats: &stats,
+        };
+        update_sysfs_device(&update, &self.sysfs_nodes, &mut self.registered_devices);
+        self.devices.insert(
+            watch_udid,
+            DeviceState {
+                dev_name,
+                display_name: comp_data.device_name.clone(),
+                model_readable: model_name,
+                model_detail,
+                hardware_model: hw_model,
+                class,
+                os_version: comp_data.product_version.clone(),
+                product_type: comp_data.model_code.clone(),
+                provider: parent_provider.clone(),
+                connections: HashMap::new(),
+                last_cap: cap,
+                last_status: stats.status,
+                observer: None,
+                companions: Vec::new(),
+            },
+        );
     }
 
-    pub fn handle_attached(
+    pub async fn handle_attached(
         &mut self,
         dev_id: u32,
         udid: String,
         conn_type: String,
-        tx: &mpsc::Sender<DaemonEvent>,
+        tx: &mpsc::UnboundedSender<DaemonEvent>,
     ) {
         self.dev_to_udid.insert(dev_id, udid.clone());
 
+        let provider = UsbmuxdProvider {
+            addr: UsbmuxdAddr::default(),
+            tag: 0,
+            udid: udid.clone(),
+            device_id: dev_id,
+            label: "fruitjuiced".to_string(),
+        };
+
         if let Some(state) = self.devices.get_mut(&udid) {
-            let prev_conn = if state.connections.values().any(|c| c == "USB") {
-                "Wired"
-            } else {
-                "Wireless"
-            };
+            let prev_conn = conn_mode(&state.connections);
             state.connections.insert(dev_id, conn_type);
-            let new_conn = if state.connections.values().any(|c| c == "USB") {
-                "Wired"
-            } else {
-                "Wireless"
-            };
-            let is_network = new_conn == "Wireless";
+            state.provider = provider.clone();
+            let new_conn = conn_mode(&state.connections);
 
             if prev_conn != new_conn {
                 println!(
                     "[CHG] {} Connection: {} >> {}",
                     state.display_name, prev_conn, new_conn
                 );
-                if let Some(mut child) = state.observer.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if let Some(h) = state.observer.take() {
+                    h.abort();
                 }
-                state.observer = spawn_battery_observer(&udid, is_network, tx.clone());
+                state.observer = Some(spawn_battery_observer(provider.clone(), tx.clone()));
 
                 if new_conn == "Wired"
-                    && let Some(stats) = query_battery(&udid, is_network)
+                    && let Some(stats) = query_battery(&provider).await
                 {
-                    update_sysfs_device(
-                        &state.dev_name,
-                        &state.class,
-                        &udid,
-                        &state.display_name,
-                        &stats,
-                        &self.sysfs_nodes,
-                        &mut self.registered_devices,
-                    );
+                    let update = state.to_sysfs_update(&udid, &stats);
+                    update_sysfs_device(&update, &self.sysfs_nodes, &mut self.registered_devices);
                     state.log_battery_changes(&stats);
-                    state.last_poll = Instant::now();
                 }
             }
-        } else {
-            let is_network = conn_type == "Network";
-            let (display_name, readable_model, class) = query_model_info(&udid, is_network);
-            let dev_name = format!("fj_{}_{}", class, udid);
-            if let Some(stats) = query_battery(&udid, is_network) {
-                let health = if stats.charge_full_design > 0 {
-                    (stats.charge_full as f32 / stats.charge_full_design as f32) * 100.0
-                } else {
-                    0.0
-                };
-                println!(
-                    "[NEW] {} ({}) {}% [{}] (Health: {:.1}%, {} cycles)",
-                    display_name, readable_model, stats.cap, stats.status, health, stats.cycles
-                );
-                update_sysfs_device(
-                    &dev_name,
-                    &class,
-                    &udid,
-                    &display_name,
-                    &stats,
-                    &self.sysfs_nodes,
-                    &mut self.registered_devices,
-                );
+            return;
+        }
 
-                let observer = spawn_battery_observer(&udid, is_network, tx.clone());
+        let battery_stats = query_battery(&provider).await;
+        let self_model = battery_stats
+            .as_ref()
+            .and_then(|s| s.self_reported_model.as_deref());
 
-                let mut connections = HashMap::new();
-                connections.insert(dev_id, conn_type);
+        let model_info = query_device_info(&provider, self_model).await;
+        let dev_name = format!("fj_{}_{}", model_info.class, udid);
 
-                let companions = query_all_companions(&udid);
-                let mut companion_udids = Vec::new();
-                for comp in &companions {
-                    companion_udids.push(comp.udid.clone());
-                }
+        let Some(stats) = battery_stats else {
+            return;
+        };
 
-                self.devices.insert(
-                    udid.clone(),
-                    DeviceState {
-                        dev_name,
-                        display_name,
-                        model_readable: readable_model,
-                        class,
-                        connections,
-                        last_poll: Instant::now(),
-                        last_cap: stats.cap,
-                        last_status: stats.status.clone(),
-                        observer,
-                        parent_udid: None,
-                        companions: companion_udids,
-                    },
-                );
+        let health_str = stats.format_health();
 
-                for comp in companions {
-                    self.register_or_update_companion(&udid, &comp);
-                }
-            }
+        println!(
+            "[NEW] {} ({}) {}% [{}] (Health: {}, {} cycles, OS: {})",
+            model_info.display_name,
+            model_info.model_name,
+            stats.cap,
+            stats.status,
+            health_str,
+            stats.cycles,
+            model_info.os_version
+        );
+
+        let update = SysfsDeviceUpdate {
+            dev_name: &dev_name,
+            class: &model_info.class,
+            udid: &udid,
+            device_name: &model_info.display_name,
+            device_model: &model_info.model_name,
+            model_detail: &model_info.model_detail,
+            hardware_model: &model_info.hardware_model,
+            os_version: &model_info.os_version,
+            product_type: &model_info.product_type,
+            stats: &stats,
+        };
+        update_sysfs_device(&update, &self.sysfs_nodes, &mut self.registered_devices);
+
+        let observer = Some(spawn_battery_observer(provider.clone(), tx.clone()));
+        let mut connections = HashMap::new();
+        connections.insert(dev_id, conn_type);
+
+        let companions = query_all_companions(&provider).await;
+        let companion_udids: Vec<String> = companions.iter().map(|c| c.udid.clone()).collect();
+
+        self.devices.insert(
+            udid.clone(),
+            DeviceState {
+                dev_name,
+                display_name: model_info.display_name,
+                model_readable: model_info.model_name,
+                model_detail: model_info.model_detail,
+                hardware_model: model_info.hardware_model,
+                class: model_info.class,
+                os_version: model_info.os_version,
+                product_type: model_info.product_type,
+                provider: provider.clone(),
+                connections,
+                last_cap: stats.cap,
+                last_status: stats.status.clone(),
+                observer,
+                companions: companion_udids,
+            },
+        );
+
+        for comp in companions {
+            self.register_or_update_companion(&comp, &provider);
         }
     }
 
-    pub fn handle_detached(&mut self, dev_id: u32, tx: &mpsc::Sender<DaemonEvent>) {
-        if let Some(udid) = self.dev_to_udid.remove(&dev_id)
-            && let Some(state) = self.devices.get_mut(&udid)
-        {
-            let prev_conn = if state.connections.values().any(|c| c == "USB") {
-                "Wired"
-            } else {
-                "Wireless"
-            };
-            state.connections.remove(&dev_id);
-            if state.connections.is_empty() {
-                println!("[DEL] {} ({})", state.display_name, state.model_readable);
-                if let Some(mut child) = state.observer.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                remove_sysfs_device(
-                    &state.dev_name,
-                    self.remove_node,
-                    &mut self.registered_devices,
-                );
-                let comp_list = state.companions.clone();
-                self.devices.remove(&udid);
-                for c_udid in comp_list {
-                    if let Some(comp_state) = self.devices.remove(&c_udid) {
-                        println!(
-                            "[DEL] {} ({})",
-                            comp_state.display_name, comp_state.model_readable
-                        );
-                        remove_sysfs_device(
-                            &comp_state.dev_name,
-                            self.remove_node,
-                            &mut self.registered_devices,
-                        );
-                    }
-                }
-            } else {
-                let new_conn = if state.connections.values().any(|c| c == "USB") {
-                    "Wired"
-                } else {
-                    "Wireless"
-                };
-                if prev_conn != new_conn {
+    pub fn handle_detached(&mut self, dev_id: u32, tx: &mpsc::UnboundedSender<DaemonEvent>) {
+        let Some(udid) = self.dev_to_udid.remove(&dev_id) else {
+            return;
+        };
+        let Some(state) = self.devices.get_mut(&udid) else {
+            return;
+        };
+
+        let prev_conn = conn_mode(&state.connections);
+        state.connections.remove(&dev_id);
+
+        if state.connections.is_empty() {
+            println!("[DEL] {} ({})", state.display_name, state.model_readable);
+            if let Some(h) = state.observer.take() {
+                h.abort();
+            }
+            remove_sysfs_device(
+                &state.dev_name,
+                self.remove_node,
+                &mut self.registered_devices,
+            );
+            let comp_list = state.companions.clone();
+            self.devices.remove(&udid);
+            for c_udid in comp_list {
+                if let Some(comp_state) = self.devices.remove(&c_udid) {
                     println!(
-                        "[CHG] {} {} >> {}",
-                        state.display_name, prev_conn, new_conn
+                        "[DEL] {} ({})",
+                        comp_state.display_name, comp_state.model_readable
                     );
-                    if let Some(mut child) = state.observer.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                    let is_network = new_conn == "Wireless";
-                    state.observer = spawn_battery_observer(&udid, is_network, tx.clone());
-                }
-            }
-        }
-    }
-
-    pub fn handle_battery_push(&mut self, udid: &str) {
-        let mut comp_udids = Vec::new();
-        if let Some(state) = self.devices.get_mut(udid)
-            && state.last_poll.elapsed() >= Duration::from_millis(300)
-        {
-            state.last_poll = Instant::now();
-            let is_network = !state.connections.values().any(|c| c == "USB");
-            if let Some(stats) = query_battery(udid, is_network) {
-                update_sysfs_device(
-                    &state.dev_name,
-                    &state.class,
-                    udid,
-                    &state.display_name,
-                    &stats,
-                    &self.sysfs_nodes,
-                    &mut self.registered_devices,
-                );
-                state.log_battery_changes(&stats);
-            }
-            comp_udids = state.companions.clone();
-        }
-
-        for c_udid in comp_udids {
-            if let Some((cap, is_charging)) = query_companion_battery(udid, &c_udid) {
-                let status = if is_charging {
-                    "Charging".to_string()
-                } else if cap == 100 {
-                    "Full".to_string()
-                } else {
-                    "Discharging".to_string()
-                };
-                let stats = BatteryStats {
-                    cap,
-                    status,
-                    voltage: 4000,
-                    cycles: 0,
-                    charge_full_design: 1000,
-                    charge_full: 1000,
-                    charge_now: (cap as i32) * 10,
-                    serial: String::new(),
-                };
-                if let Some(comp_state) = self.devices.get_mut(&c_udid) {
-                    update_sysfs_device(
+                    remove_sysfs_device(
                         &comp_state.dev_name,
-                        &comp_state.class,
-                        &c_udid,
-                        &comp_state.display_name,
-                        &stats,
-                        &self.sysfs_nodes,
+                        self.remove_node,
                         &mut self.registered_devices,
                     );
-                    comp_state.log_battery_changes(&stats);
                 }
             }
+            return;
+        }
+
+        if let Some(&remaining_dev_id) = state.connections.keys().next() {
+            state.provider.device_id = remaining_dev_id;
+        }
+        let new_conn = conn_mode(&state.connections);
+        if prev_conn != new_conn {
+            println!("[CHG] {} {} >> {}", state.display_name, prev_conn, new_conn);
+            if let Some(h) = state.observer.take() {
+                h.abort();
+            }
+            state.observer = Some(spawn_battery_observer(state.provider.clone(), tx.clone()));
         }
     }
 
-    pub fn handle_periodic_poll(&mut self, interval: u64) {
-        let mut parent_to_comps: Vec<(String, Vec<String>)> = Vec::new();
-        for (udid, state) in self.devices.iter_mut() {
-            if state.parent_udid.is_none()
-                && state.last_poll.elapsed() >= Duration::from_secs(interval)
-            {
-                state.last_poll = Instant::now();
-                let is_network = !state.connections.values().any(|c| c == "USB");
-                if let Some(stats) = query_battery(udid, is_network) {
-                    update_sysfs_device(
-                        &state.dev_name,
-                        &state.class,
-                        udid,
-                        &state.display_name,
-                        &stats,
-                        &self.sysfs_nodes,
-                        &mut self.registered_devices,
-                    );
-                    state.log_battery_changes(&stats);
-                }
-                if !state.companions.is_empty() {
-                    parent_to_comps.push((udid.clone(), state.companions.clone()));
-                }
-            }
+    async fn refresh_device_battery(
+        &mut self,
+        udid: &str,
+    ) -> Option<(UsbmuxdProvider, Vec<String>)> {
+        let state = self.devices.get_mut(udid)?;
+        let provider = state.provider.clone();
+        if let Some(stats) = query_battery(&provider).await {
+            let update = state.to_sysfs_update(udid, &stats);
+            update_sysfs_device(&update, &self.sysfs_nodes, &mut self.registered_devices);
+            state.log_battery_changes(&stats);
+        }
+        Some((provider, state.companions.clone()))
+    }
+
+    async fn refresh_companion_battery(&mut self, provider: &UsbmuxdProvider, c_udid: &str) {
+        let Some((mut cap, is_charging)) = query_companion_battery(provider, c_udid).await else {
+            return;
+        };
+
+        if cap == 0 {
+            cap = self.devices.get(c_udid).map(|d| d.last_cap).unwrap_or(0);
         }
 
-        for (p_udid, comps) in parent_to_comps {
-            for c_udid in comps {
-                if let Some((cap, is_charging)) = query_companion_battery(&p_udid, &c_udid) {
-                    let status = if is_charging {
-                        "Charging".to_string()
-                    } else if cap == 100 {
-                        "Full".to_string()
-                    } else {
-                        "Discharging".to_string()
-                    };
-                    let stats = BatteryStats {
-                        cap,
-                        status,
-                        voltage: 4000,
-                        cycles: 0,
-                        charge_full_design: 1000,
-                        charge_full: 1000,
-                        charge_now: (cap as i32) * 10,
-                        serial: String::new(),
-                    };
-                    if let Some(comp_state) = self.devices.get_mut(&c_udid) {
-                        update_sysfs_device(
-                            &comp_state.dev_name,
-                            &comp_state.class,
-                            &c_udid,
-                            &comp_state.display_name,
-                            &stats,
-                            &self.sysfs_nodes,
-                            &mut self.registered_devices,
-                        );
-                        comp_state.log_battery_changes(&stats);
-                    }
-                }
-            }
+        let stats = BatteryStats::companion_synthetic(cap, is_charging, String::new(), None);
+        let Some(comp_state) = self.devices.get_mut(c_udid) else {
+            return;
+        };
+
+        let update = comp_state.to_sysfs_update(c_udid, &stats);
+        update_sysfs_device(&update, &self.sysfs_nodes, &mut self.registered_devices);
+        comp_state.log_battery_changes(&stats);
+    }
+
+    pub async fn handle_battery_push(&mut self, udid: &str) {
+        let Some((provider, companions)) = self.refresh_device_battery(udid).await else {
+            return;
+        };
+
+        for c_udid in companions {
+            self.refresh_companion_battery(&provider, &c_udid).await;
         }
+    }
+
+    pub fn handle_mux_disconnected(&mut self) {
+        for (_, mut state) in self.devices.drain() {
+            if let Some(h) = state.observer.take() {
+                h.abort();
+            }
+            remove_sysfs_device(
+                &state.dev_name,
+                self.remove_node,
+                &mut self.registered_devices,
+            );
+        }
+        self.dev_to_udid.clear();
     }
 }
