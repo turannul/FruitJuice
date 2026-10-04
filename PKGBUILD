@@ -2,13 +2,13 @@
 # Packager: Turann_ (turannul) <turanull000@gmail.com>
 
 pkgname=fruitjuice
-pkgver=2.0.1_1.0.r22.g9556962
+pkgver=1
 pkgrel=1
 pkgdesc="iDevice battery bridge"
 arch=('x86_64')
 url="https://github.com/turannul/fruitjuice"
 license=('GPL-2.0-only')
-depends=('dkms' 'netmuxd' 'libimobiledevice')
+depends=('dkms' 'netmuxd')
 optdepends=('linux-headers: build the driver module against the Arch kernel')
 makedepends=('cargo' 'git')
 provides=("$pkgname-dkms" "$pkgname-git")
@@ -18,12 +18,16 @@ sha256sums=('SKIP')
 
 pkgver() {
   local _daemon _module _revision _commit
-  local _p="$srcdir/fruitjuice" _dp="$srcdir/fruitjuice/src/daemon/Cargo.toml" _mp="$srcdir/fruitjuice/src/module/dkms.conf"
+  local _p="$srcdir/fruitjuice" _dp="$_p/src/daemon/Cargo.toml" _mp="$_p/src/module/dkms.conf"
   _daemon=$(awk -F'"' '/^\[package\]/{p=1} p && /^version *=/{print $2; exit}' "$_dp")
   _module=$(sed -n 's/^[[:space:]]*PACKAGE_VERSION[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$_mp")
   _revision=$(git -C "$_p" rev-list --count HEAD)
-  _commit=$(git -C "$_p" rev-parse --short=7 HEAD)
+  _commit=$(git -C "$_p" log -1 --format="%h")
   printf '%s_%s.r%s.g%s' "${_daemon:?}" "${_module:?}" "${_revision:?}" "${_commit:?}"
+}
+
+prepare() {
+  cargo fetch --locked --manifest-path="$srcdir/fruitjuice/src/daemon/Cargo.toml"
 }
 
 build() {
