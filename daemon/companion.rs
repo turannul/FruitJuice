@@ -154,14 +154,17 @@ pub async fn query_companion_battery(
         async move {
             match CompanionProxy::connect(&prov).await {
                 Ok(mut c) => c.get_value(&w_udid, key).await.ok(),
-                Err(e) => {
-                    eprintln!(
-                        "[ERR] CompanionProxy connect failed for [...{}]: {}",
-                        mask_udid(&prov.udid),
-                        e
-                    );
-                    None
-                }
+                Err(e) => match CompanionProxy::connect(&prov).await {
+                    Ok(mut c) => c.get_value(&w_udid, key).await.ok(),
+                    Err(_) => {
+                        eprintln!(
+                            "[ERR] CompanionProxy connect failed for [...{}]: {}",
+                            mask_udid(&prov.udid),
+                            e
+                        );
+                        None
+                    }
+                },
             }
         }
     };
@@ -180,14 +183,17 @@ pub async fn query_all_companions(provider: &UsbmuxdProvider) -> Vec<CompanionDe
 
     let mut comp = match CompanionProxy::connect(provider).await {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "[ERR] Failed to connect CompanionProxy for [...{}]: {}",
-                mask_udid(&provider.udid),
-                e
-            );
-            return result;
-        }
+        Err(e) => match CompanionProxy::connect(provider).await {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!(
+                    "[ERR] Failed to connect CompanionProxy for [...{}]: {}",
+                    mask_udid(&provider.udid),
+                    e
+                );
+                return result;
+            }
+        },
     };
 
     let registry = match comp.get_device_registry().await {

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::exit;
 
 use fruitjuice::netmux::run_usbmuxd_listener;
-use fruitjuice::state::{DaemonEvent, DeviceManager};
+use fruitjuice::state::{DaemonEvent, DeviceManager, NOISY};
 use fruitjuice::sysfs::SysfsNodes;
 
 fn print_help() {
@@ -12,6 +12,7 @@ fn print_help() {
     println!();
     println!("Options:");
     println!("  -h, --help    Print help information");
+    println!("  -n, --noisy   Print device change events ([CHG])");
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -19,6 +20,10 @@ async fn main() {
     if env::args().any(|arg| arg == "-h" || arg == "--help") {
         print_help();
         exit(0);
+    }
+
+    if env::args().any(|arg| arg == "-n" || arg == "--noisy") {
+        NOISY.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     let a_node = "/sys/kernel/fruitjuice/add_device";

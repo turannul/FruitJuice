@@ -47,6 +47,8 @@ static LIST_HEAD(idev_devices);
 static DEFINE_MUTEX(idev_lock);
 static struct platform_device *idev_pdev;
 
+#define IDEV_MAX_DEVICES 16
+
 static int idev_get_property(struct power_supply *psy,
                                enum power_supply_property psp,
                                union power_supply_propval *val)
@@ -132,40 +134,59 @@ static int idev_set_property(struct power_supply *psy,
 
     switch (psp) {
     case POWER_SUPPLY_PROP_CAPACITY:
+        if (val->intval < 0 || val->intval > 100)
+            return -EINVAL;
         inst->capacity = val->intval;
         break;
     case POWER_SUPPLY_PROP_STATUS:
+        if (val->intval < 0 || val->intval > POWER_SUPPLY_STATUS_FULL)
+            return -EINVAL;
         inst->status = val->intval;
         break;
     case POWER_SUPPLY_PROP_PRESENT:
-        inst->present = val->intval;
+        inst->present = val->intval ? 1 : 0;
         break;
     case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+        if (val->intval < 0)
+            return -EINVAL;
         inst->voltage_now = val->intval;
         break;
     case POWER_SUPPLY_PROP_CYCLE_COUNT:
+        if (val->intval < 0)
+            return -EINVAL;
         inst->cycle_count = val->intval;
         break;
     case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+        if (val->intval < 0)
+            return -EINVAL;
         inst->charge_full_design = val->intval;
         break;
     case POWER_SUPPLY_PROP_CHARGE_FULL:
+        if (val->intval < 0)
+            return -EINVAL;
         inst->charge_full = val->intval;
         break;
     case POWER_SUPPLY_PROP_CHARGE_NOW:
+        if (val->intval < 0)
+            return -EINVAL;
         inst->charge_now = val->intval;
         break;
     case POWER_SUPPLY_PROP_CURRENT_NOW:
         inst->current_now = val->intval;
         break;
     case POWER_SUPPLY_PROP_POWER_NOW:
+        if (val->intval < 0)
+            return -EINVAL;
         inst->power_now = val->intval;
         break;
     case POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW:
-        inst->time_to_empty_now = val->intval;
-        break;
     case POWER_SUPPLY_PROP_TIME_TO_FULL_NOW:
-        inst->time_to_full_now = val->intval;
+        if (val->intval < 0)
+            return -EINVAL;
+        if (psp == POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW)
+            inst->time_to_empty_now = val->intval;
+        else
+            inst->time_to_full_now = val->intval;
         break;
     default:
         return -EINVAL;
@@ -218,7 +239,7 @@ static DEVICE_ATTR_RO(attr_name)
 /* Declare custom device attributes */
 IDEV_ATTR_RO_STR(udid, udid);
 IDEV_ATTR_RO_STR(device_model, device_model);
-IDEV_ATTR_RO_STR(model, device_model);
+IDEV_ATTR_RO_STR(model, model);
 
 static ssize_t model_detail_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -281,7 +302,7 @@ static enum power_supply_property idev_props[] = {
 static ssize_t add_device_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
 {
     char class_name[32], udid[128];
-    struct idev_inst *inst;
+    struct idev_inst *inst, *existing;
     struct power_supply_config psy_cfg = {};
     int ret, i;
 
@@ -306,24 +327,11 @@ static ssize_t add_device_store(struct kobject *kobj, struct kobj_attribute *att
     snprintf(inst->name, sizeof(inst->name), "fj_%s_%s", class_name, udid);
     strscpy(inst->udid, udid, sizeof(inst->udid));
 
-    mutex_lock(&idev_lock);
-    {
-        struct idev_inst *existing;
-        list_for_each_entry(existing, &idev_devices, list) {
-            if (strcmp(existing->name, inst->name) == 0 || strcmp(existing->udid, inst->udid) == 0) {
-                mutex_unlock(&idev_lock);
-                kfree(inst);
-                return count;
-            }
-        }
-    }
-    mutex_unlock(&idev_lock);
-    
     inst->status = POWER_SUPPLY_STATUS_UNKNOWN;
     inst->present = 0;
     inst->capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_UNKNOWN;
     inst->health = POWER_SUPPLY_HEALTH_GOOD;
-    
+
     inst->desc.name = inst->name;
     inst->desc.type = POWER_SUPPLY_TYPE_BATTERY;
     inst->desc.properties = idev_props;
@@ -334,14 +342,33 @@ static ssize_t add_device_store(struct kobject *kobj, struct kobj_attribute *att
 
     psy_cfg.drv_data = inst;
     psy_cfg.attr_grp = idev_groups;
+
+    mutex_lock(&idev_lock);
+    {
+        int count = 0;
+        list_for_each_entry(existing, &idev_devices, list) {
+            if (strcmp(existing->name, inst->name) == 0 || strcmp(existing->udid, inst->udid) == 0) {
+                mutex_unlock(&idev_lock);
+                kfree(inst);
+                return count;
+            }
+            count++;
+        }
+        if (count >= IDEV_MAX_DEVICES) {
+            mutex_unlock(&idev_lock);
+            kfree(inst);
+            return -ENOSPC;
+        }
+    }
+
     inst->psy = power_supply_register(&idev_pdev->dev, &inst->desc, &psy_cfg);
     if (IS_ERR(inst->psy)) {
         ret = PTR_ERR(inst->psy);
+        mutex_unlock(&idev_lock);
         kfree(inst);
         return ret;
     }
 
-    mutex_lock(&idev_lock);
     list_add(&inst->list, &idev_devices);
     mutex_unlock(&idev_lock);
 
@@ -655,7 +682,6 @@ static void __exit idev_factory_exit(void)
 
     list_for_each_entry_safe(inst, tmp, &local_cleanup, list) {
         power_supply_unregister(inst->psy);
-        list_del(&inst->list);
         kfree(inst);
     }
     kobject_put(idev_kobj);
@@ -668,4 +694,4 @@ module_exit(idev_factory_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("turannul");
 MODULE_DESCRIPTION("FruitJuice: iDevice Battery Bridge");
-MODULE_VERSION("2.0");
+MODULE_VERSION("2.0.1");

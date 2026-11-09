@@ -4,11 +4,11 @@ all: build
 build: daemon module
 
 daemon:
-	cargo build --locked --release --manifest-path src/daemon/Cargo.toml
+	cargo build --locked --release --manifest-path daemon/Cargo.toml
 
 module:
-	$(MAKE) -C src/module
+	$(MAKE) -C module
 
 clean:
-	cargo clean --manifest-path src/daemon/Cargo.toml
-	$(MAKE) -C src/module clean
+	cargo clean --manifest-path daemon/Cargo.toml
+	$(MAKE) -C module clean

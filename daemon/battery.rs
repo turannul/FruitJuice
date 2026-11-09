@@ -1,11 +1,10 @@
+use crate::state::DaemonEvent;
 use idevice::IdeviceService;
 use idevice::provider::UsbmuxdProvider;
 use idevice::services::diagnostics_relay::DiagnosticsRelayClient;
 use idevice::services::notification_proxy::NotificationProxyClient;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-
-use crate::state::DaemonEvent;
 
 #[derive(Debug, Clone)]
 pub struct BatteryStats {
@@ -76,14 +75,17 @@ impl BatteryStats {
 pub async fn query_battery(provider: &UsbmuxdProvider) -> Option<BatteryStats> {
     let mut diag = match DiagnosticsRelayClient::connect(provider).await {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "[ERR] DiagnosticsRelayClient connect failed for [...{}]: {}",
-                crate::companion::mask_udid(&provider.udid),
-                e
-            );
-            return None;
-        }
+        Err(e) => match DiagnosticsRelayClient::connect(provider).await {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!(
+                    "[ERR] DiagnosticsRelayClient connect failed for [...{}]: {}",
+                    crate::companion::mask_udid(&provider.udid),
+                    e
+                );
+                return None;
+            }
+        },
     };
 
     // 1. Query IORegistry "product" for self-reported model name
@@ -277,55 +279,67 @@ pub fn spawn_battery_observer(
     tx: mpsc::UnboundedSender<DaemonEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut notif = match NotificationProxyClient::connect(&provider).await {
-            Ok(c) => c,
-            Err(e) => {
+        let mut fails = 0;
+
+        loop {
+            let mut notif = match NotificationProxyClient::connect(&provider).await {
+                Ok(c) => {
+                    fails = 0;
+                    c
+                }
+                Err(e) => {
+                    fails += 1;
+                    if fails > 3 {
+                        eprintln!(
+                            "[ERR] giving up observing [...{}] after {} attempts: {}",
+                            crate::companion::mask_udid(&provider.udid),
+                            fails,
+                            e
+                        );
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            if let Err(e) = notif
+                .observe_notification("com.apple.system.powersources")
+                .await
+            {
                 eprintln!(
-                    "[ERR] Failed to connect notification proxy for [...{}]: {}",
+                    "[WARN] Failed to observe powersources for [...{}]: {}",
                     crate::companion::mask_udid(&provider.udid),
                     e
                 );
-                return;
             }
-        };
+            if let Err(e) = notif
+                .observe_notification("com.apple.system.powersources.percent")
+                .await
+            {
+                eprintln!(
+                    "[WARN] Failed to observe percent for [...{}]: {}",
+                    crate::companion::mask_udid(&provider.udid),
+                    e
+                );
+            }
 
-        if let Err(e) = notif
-            .observe_notification("com.apple.system.powersources")
-            .await
-        {
-            eprintln!(
-                "[WARN] Failed to observe powersources for [...{}]: {}",
-                crate::companion::mask_udid(&provider.udid),
-                e
-            );
-        }
-        if let Err(e) = notif
-            .observe_notification("com.apple.system.powersources.percent")
-            .await
-        {
-            eprintln!(
-                "[WARN] Failed to observe percent for [...{}]: {}",
-                crate::companion::mask_udid(&provider.udid),
-                e
-            );
-        }
-
-        loop {
-            match notif.receive_notification().await {
-                Ok(name) => {
-                    if name.starts_with("com.apple.system.powersources") {
-                        let _ = tx.send(DaemonEvent::BatteryPush {
-                            udid: provider.udid.clone(),
-                        });
+            loop {
+                match notif.receive_notification().await {
+                    Ok(name) => {
+                        if name.starts_with("com.apple.system.powersources") {
+                            let _ = tx.send(DaemonEvent::BatteryPush {
+                                udid: provider.udid.clone(),
+                            });
+                        }
                     }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[WARN] NotificationProxy connection closed for [...{}]: {}",
-                        crate::companion::mask_udid(&provider.udid),
-                        e
-                    );
-                    break;
+                    Err(e) => {
+                        eprintln!(
+                            "[WARN] NotificationProxy connection closed for [...{}]: {}. Reconnecting.",
+                            crate::companion::mask_udid(&provider.udid),
+                            e
+                        );
+                        break;
+                    }
                 }
             }
         }

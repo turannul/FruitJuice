@@ -13,6 +13,16 @@ use crate::companion::{
 };
 use crate::sysfs::{SysfsDeviceUpdate, SysfsNodes, remove_sysfs_device, update_sysfs_device};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub static NOISY: AtomicBool = AtomicBool::new(false);
+
+fn chg(args: std::fmt::Arguments) {
+    if NOISY.load(Ordering::Relaxed) {
+        println!("[CHG] {args}");
+    }
+}
+
 fn conn_mode(connections: &HashMap<u32, String>) -> &'static str {
     match connections.values().any(|c| c == "USB") {
         true => "Wired",
@@ -180,7 +190,7 @@ impl DeviceState {
             changes.push(format!("{} >> {}", self.last_status, stats.status));
         }
         if !changes.is_empty() {
-            println!("[CHG] {} {}", self.display_name, changes.join(" "));
+            chg(format_args!("{} {}", self.display_name, changes.join(" ")));
             self.last_cap = stats.cap;
             self.last_status = stats.status.clone();
         }
@@ -307,10 +317,10 @@ impl<'a> DeviceManager<'a> {
             let new_conn = conn_mode(&state.connections);
 
             if prev_conn != new_conn {
-                println!(
-                    "[CHG] {} Connection: {} >> {}",
+                chg(format_args!(
+                    "{} Connection: {} >> {}",
                     state.display_name, prev_conn, new_conn
-                );
+                ));
                 if let Some(h) = state.observer.take() {
                     h.abort();
                 }
@@ -442,7 +452,10 @@ impl<'a> DeviceManager<'a> {
         }
         let new_conn = conn_mode(&state.connections);
         if prev_conn != new_conn {
-            println!("[CHG] {} {} >> {}", state.display_name, prev_conn, new_conn);
+            chg(format_args!(
+                "{} {} >> {}",
+                state.display_name, prev_conn, new_conn
+            ));
             if let Some(h) = state.observer.take() {
                 h.abort();
             }
